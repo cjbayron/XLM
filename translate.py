@@ -23,9 +23,18 @@ import torch
 
 from src.utils import AttrDict
 from src.utils import bool_flag, initialize_exp
-from src.data.dictionary import Dictionary
+#from src.data.dictionary import Dictionary
+from src.data.dictionary import Dictionary, BOS_WORD, EOS_WORD, PAD_WORD, UNK_WORD, MASK_WORD
 from src.model.transformer import TransformerModel
 
+
+DECODER_ONLY_PARAMS = [
+    'layer_norm15.%i.weight', 'layer_norm15.%i.bias',
+    'encoder_attn.%i.q_lin.weight', 'encoder_attn.%i.q_lin.bias',
+    'encoder_attn.%i.k_lin.weight', 'encoder_attn.%i.k_lin.bias',
+    'encoder_attn.%i.v_lin.weight', 'encoder_attn.%i.v_lin.bias',
+    'encoder_attn.%i.out_lin.weight', 'encoder_attn.%i.out_lin.bias'
+]
 
 def get_parser():
     """
@@ -66,16 +75,42 @@ def main(params):
     model_params = AttrDict(reloaded['params'])
     logger.info("Supported languages: %s" % ", ".join(model_params.lang2id.keys()))
 
+
+    dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'])
+    model_params.n_words = len(dico)
+    model_params.bos_index = dico.index(BOS_WORD)
+    model_params.eos_index = dico.index(EOS_WORD)
+    model_params.pad_index = dico.index(PAD_WORD)
+    model_params.unk_index = dico.index(UNK_WORD)
+    model_params.mask_index = dico.index(MASK_WORD)
+
     # update dictionary parameters
     for name in ['n_words', 'bos_index', 'eos_index', 'pad_index', 'unk_index', 'mask_index']:
         setattr(params, name, getattr(model_params, name))
 
     # build dictionary / build encoder / build decoder / reload weights
-    dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'])
-    encoder = TransformerModel(model_params, dico, is_encoder=True, with_output=True).cuda().eval()
-    decoder = TransformerModel(model_params, dico, is_encoder=False, with_output=True).cuda().eval()
-    encoder.load_state_dict(reloaded['encoder'])
-    decoder.load_state_dict(reloaded['decoder'])
+    # dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'])
+    # encoder = TransformerModel(model_params, dico, is_encoder=True, with_output=True).cuda().eval()
+    # decoder = TransformerModel(model_params, dico, is_encoder=False, with_output=True).cuda().eval()
+    encoder = TransformerModel(model_params, dico, is_encoder=True, with_output=True).eval()
+    decoder = TransformerModel(model_params, dico, is_encoder=False, with_output=True).eval()
+
+    encoder.load_state_dict(reloaded['model'])
+
+    # WORKAROUND only!
+    dec_reload = reloaded['model' if 'model' in reloaded else 'decoder']
+    if all([k.startswith('module.') for k in dec_reload.keys()]):
+        dec_reload = {k[len('module.'):]: v for k, v in dec_reload.items()}
+    for i in range(reloaded['params']['n_layers']):
+        for name in DECODER_ONLY_PARAMS:
+            if name % i not in dec_reload:
+                logger.warning("Parameter %s not found." % (name % i))
+                dec_reload[name % i] = decoder.state_dict()[name % i]
+
+    decoder.load_state_dict(dec_reload)
+
+    # decoder.load_state_dict(reloaded['model'])
+
     params.src_id = model_params.lang2id[params.src_lang]
     params.tgt_id = model_params.lang2id[params.tgt_lang]
 
@@ -103,9 +138,12 @@ def main(params):
         langs = batch.clone().fill_(params.src_id)
 
         # encode source batch and translate it
-        encoded = encoder('fwd', x=batch.cuda(), lengths=lengths.cuda(), langs=langs.cuda(), causal=False)
+        encoded = encoder('fwd', x=batch, lengths=lengths, langs=langs, causal=False)
         encoded = encoded.transpose(0, 1)
-        decoded, dec_lengths = decoder.generate(encoded, lengths.cuda(), params.tgt_id, max_len=int(1.5 * lengths.max().item() + 10))
+        decoded, dec_lengths = decoder.generate(encoded, lengths, params.tgt_id, max_len=int(1.5 * lengths.max().item() + 10))
+        # encoded = encoder('fwd', x=batch.cuda(), lengths=lengths.cuda(), langs=langs.cuda(), causal=False)
+        # encoded = encoded.transpose(0, 1)
+        # decoded, dec_lengths = decoder.generate(encoded, lengths.cuda(), params.tgt_id, max_len=int(1.5 * lengths.max().item() + 10))
 
         # convert sentences to words
         for j in range(decoded.size(1)):
@@ -134,7 +172,7 @@ if __name__ == '__main__':
     # check parameters
     assert os.path.isfile(params.model_path)
     assert params.src_lang != '' and params.tgt_lang != '' and params.src_lang != params.tgt_lang
-    assert params.output_path and not os.path.isfile(params.output_path)
+    # assert params.output_path and not os.path.isfile(params.output_path)
 
     # translate
     with torch.no_grad():

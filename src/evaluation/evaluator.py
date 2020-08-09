@@ -252,6 +252,27 @@ class Evaluator(object):
 
         return scores
 
+    def run_mt(self, trainer):
+        """
+        Run MT evaluations.
+        """
+        params = self.params
+        scores = OrderedDict({'epoch': trainer.epoch})
+
+        with torch.no_grad():
+
+            for data_set in ['valid', 'test']:
+
+                # machine translation task (evaluate perplexity and accuracy)
+                # lang1: src->tgt, lang2: tgt->src
+
+                for lang1, lang2 in set(params.mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):
+                    eval_bleu = params.eval_bleu and params.is_master # true
+                    self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu, use_cuda=False)
+
+        return scores
+
+
     def evaluate_clm(self, scores, data_set, lang1, lang2):
         """
         Evaluate perplexity and next word prediction accuracy.
@@ -415,11 +436,11 @@ class EncDecEvaluator(Evaluator):
         self.encoder = trainer.encoder
         self.decoder = trainer.decoder
 
-    def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
+    def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu, use_cuda=True):
         """
         Evaluate perplexity and next word prediction accuracy.
         """
-        params = self.params
+        params = self.paramsc
         assert data_set in ['valid', 'test']
         assert lang1 in params.langs
         assert lang2 in params.langs
@@ -457,11 +478,13 @@ class EncDecEvaluator(Evaluator):
             # target words to predict
             alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
             pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
-            y = x2[1:].masked_select(pred_mask[:-1])
+            #y = x2[1:].masked_select(pred_mask[:-1])
+            y = x2[1:].masked_select(pred_mask[:-1].bool()) # to mask warning
             assert len(y) == (len2 - 1).sum().item()
 
             # cuda
-            x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+            if use_cuda:
+                x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
 
             # encode source sentence
             enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
